@@ -1,0 +1,7 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Local/generated data directories
+/test_*/
+/sync_test_images/

@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "sat-test-up-count-track"
+version = "0.1.0"
+description = "Utilities for extracting video frames and visualizing/syncing GPS trajectories."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "matplotlib>=3.8",
+  "numpy>=1.26",
+]
+
+[project.scripts]
+videos-to-frames = "videos_to_frames:main"
+vis-gps-on-osm = "vis_gps_on_osm:main"
+run-all = "run_all:main"
