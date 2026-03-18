@@ -17,3 +17,6 @@ dependencies = [
 videos-to-frames = "videos_to_frames:main"
 vis-gps-on-osm = "vis_gps_on_osm:main"
 run-all = "run_all:main"
+
+[tool.setuptools]
+py-modules = ["videos_to_frames", "vis_gps_on_osm", "run_all"]

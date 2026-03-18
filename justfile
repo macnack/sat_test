@@ -10,11 +10,11 @@ default:
   @just --list
 
 setup:
-  uv venv .venv
+  uv venv --clear .venv
   uv pip install --python .venv/bin/python -r requirements.txt
 
 setup-project:
-  uv venv .venv
+  uv venv --clear .venv
   uv pip install --python .venv/bin/python -e .
 
 setup-uv:

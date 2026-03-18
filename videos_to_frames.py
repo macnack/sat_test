@@ -29,13 +29,14 @@ def extract_with_ffmpeg(video_path: Path, output_dir: Path, overwrite: bool) -> 
         "-hide_banner",
         "-loglevel",
         "error",
+        "-nostdin",
     ]
     if overwrite:
         cmd.append("-y")
     else:
         cmd.append("-n")
     cmd += ["-i", str(video_path), "-start_number", "0", str(pattern)]
-    proc = subprocess.run(cmd, check=False)
+    proc = subprocess.run(cmd, check=False, stdin=subprocess.DEVNULL)
     return proc.returncode
 
 
