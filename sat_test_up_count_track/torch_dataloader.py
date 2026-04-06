@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from bisect import bisect_left
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal
@@ -321,6 +322,7 @@ class SyncedGpsImageDataset(Dataset[dict[str, Any]]):
         roma_patch_size: int | None = None,
         map_crop_meters: float | None = None,
         map_output_hw: tuple[int, int] | None = None,
+        sample_interval_ms: float | None = None,
     ) -> None:
         scene_mode = scene is not None
         if map_scale < 1:
@@ -345,6 +347,8 @@ class SyncedGpsImageDataset(Dataset[dict[str, Any]]):
             raise ValueError(f"map_crop_meters must be > 0, got {map_crop_meters}")
         if map_output_hw is not None and (map_output_hw[0] <= 0 or map_output_hw[1] <= 0):
             raise ValueError(f"map_output_hw must be positive (H, W), got {map_output_hw}")
+        if sample_interval_ms is not None and sample_interval_ms <= 0:
+            raise ValueError(f"sample_interval_ms must be > 0, got {sample_interval_ms}")
         if roma_patch_size is not None:
             if roma_patch_size <= 0:
                 raise ValueError(f"roma_patch_size must be > 0, got {roma_patch_size}")
@@ -370,6 +374,7 @@ class SyncedGpsImageDataset(Dataset[dict[str, Any]]):
         self.map_scale = int(map_scale)
         self.map_crop_meters = float(map_crop_meters) if map_crop_meters is not None else None
         self.map_output_hw = tuple(map_output_hw) if map_output_hw is not None else None
+        self.sample_interval_ms = float(sample_interval_ms) if sample_interval_ms is not None else None
         self._scene = scene
         self._map_georef: dict[str, float | str] | None = None
         self._map_vips: Any | None = None
@@ -389,8 +394,49 @@ class SyncedGpsImageDataset(Dataset[dict[str, Any]]):
                 sequences_root=sequences_root,
                 metadata_name=metadata_name,
             )
+        if self.sample_interval_ms is not None:
+            self._samples = self._sample_by_time(self._samples, interval_ms=self.sample_interval_ms)
         if not self._samples:
             raise ValueError("No samples found for provided metadata input.")
+
+    def _sample_by_time(self, samples: list[_SampleRef], interval_ms: float) -> list[_SampleRef]:
+        interval_s = float(interval_ms) / 1000.0
+        grouped: dict[tuple[str, str], list[_SampleRef]] = {}
+        for sample in samples:
+            key = (sample.sequence, sample.scene)
+            grouped.setdefault(key, []).append(sample)
+
+        out: list[_SampleRef] = []
+        for _, group_samples in grouped.items():
+            group_samples = sorted(group_samples, key=lambda s: float(s.gps_time))
+            if len(group_samples) <= 1:
+                out.extend(group_samples)
+                continue
+
+            times = [float(s.gps_time) for s in group_samples]
+            picked = [0]
+            current_idx = 0
+            while True:
+                target_t = times[current_idx] + interval_s
+                right_idx = bisect_left(times, target_t, lo=current_idx + 1)
+                if right_idx >= len(group_samples):
+                    break
+                left_idx = right_idx - 1
+                if left_idx <= current_idx:
+                    chosen_idx = right_idx
+                else:
+                    left_dt = abs(times[left_idx] - target_t)
+                    right_dt = abs(times[right_idx] - target_t)
+                    chosen_idx = left_idx if left_dt <= right_dt else right_idx
+                    if chosen_idx <= current_idx:
+                        chosen_idx = right_idx
+                if chosen_idx <= current_idx:
+                    break
+                picked.append(chosen_idx)
+                current_idx = chosen_idx
+
+            out.extend(group_samples[i] for i in picked)
+        return out
 
     def _build_scene_index(
         self,
@@ -797,8 +843,15 @@ def create_test_dataloader(
     roma_patch_size: int | None = None,
     map_crop_meters: float | None = None,
     map_output_hw: tuple[int, int] | None = None,
+    sample_interval_ms: float | None = None,
 ) -> DataLoader[dict[str, Any]]:
-    """Create a DataLoader suitable for inference/test mode (no shuffling)."""
+    """Create a DataLoader suitable for inference/test mode (no shuffling).
+
+    sample_interval_ms:
+        Optional temporal downsampling interval. If set (e.g. 200.0), keeps one
+        frame roughly every N milliseconds by choosing the nearest available
+        sample by gps_time and dropping intermediate frames.
+    """
     dataset = SyncedGpsImageDataset(
         scene=scene,
         images_root=images_root,
@@ -816,6 +869,7 @@ def create_test_dataloader(
         roma_patch_size=roma_patch_size,
         map_crop_meters=map_crop_meters,
         map_output_hw=map_output_hw,
+        sample_interval_ms=sample_interval_ms,
     )
     return DataLoader(
         dataset,

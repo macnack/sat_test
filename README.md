@@ -135,6 +135,7 @@ loader = create_test_dataloader(
     num_workers=2,
     resize_hw=(256, 256),
     resize_mode="letterbox",
+    sample_interval_ms=200.0,  # optional: keep nearest frame every 200 ms
 )
 
 for batch in loader:
