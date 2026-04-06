@@ -11,12 +11,23 @@ requires-python = ">=3.10"
 dependencies = [
   "matplotlib>=3.8",
   "numpy>=1.26",
+  "pyproj>=3.6",
+  "kornia>=0.7",
+  "torch>=2.2",
+  "Pillow>=10.0",
+  "pyvips>=3.0",
+  "pyvips-binary>=8.18.1",
 ]
 
 [project.scripts]
 videos-to-frames = "videos_to_frames:main"
 vis-gps-on-osm = "vis_gps_on_osm:main"
 run-all = "run_all:main"
+vis-first-frame-on-tiff = "vis_first_frame_on_tiff:main"
+vis-first-frame-on-tiff-interactive = "vis_first_frame_on_tiff_interactive:main"
+stitch-frames-on-tiff-map = "stitch_frames_on_tiff_map:main"
+stitch-frames-on-tiff-map-interactive = "stitch_frames_on_tiff_map_interactive:main"
 
 [tool.setuptools]
-py-modules = ["videos_to_frames", "vis_gps_on_osm", "run_all"]
+py-modules = ["videos_to_frames", "vis_gps_on_osm", "run_all", "vis_first_frame_on_tiff", "vis_first_frame_on_tiff_interactive", "stitch_frames_on_tiff_map", "stitch_frames_on_tiff_map_interactive"]
+packages = ["sat_test_up_count_track"]
