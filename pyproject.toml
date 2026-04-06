@@ -9,14 +9,23 @@ description = "Utilities for extracting video frames and visualizing/syncing GPS
 readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
-  "matplotlib>=3.8",
   "numpy>=1.26",
   "pyproj>=3.6",
-  "kornia>=0.7",
   "torch>=2.2",
   "Pillow>=10.0",
+]
+
+[project.optional-dependencies]
+scene = [
   "pyvips>=3.0",
   "pyvips-binary>=8.18.1",
+]
+scripts = [
+  "matplotlib>=3.8",
+  "kornia>=0.7",
+]
+all = [
+  "sat-test-up-count-track[scene,scripts]",
 ]
 
 [project.scripts]

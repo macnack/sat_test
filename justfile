@@ -11,17 +11,14 @@ default:
 
 setup:
   uv venv --clear .venv
-  uv pip install --python .venv/bin/python -r requirements.txt
+  uv pip install --python .venv/bin/python -e ".[all]"
 
-setup-project:
+setup-minimal:
   uv venv --clear .venv
   uv pip install --python .venv/bin/python -e .
 
 setup-uv:
   @just setup
-
-setup-uv-project:
-  @just setup-project
 
 frames *args:
   python videos_to_frames.py --input {{videos_input}} --output {{images_output}} --gps-input {{gps_input}} {{args}}
