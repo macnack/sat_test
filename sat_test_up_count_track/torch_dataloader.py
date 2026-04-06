@@ -36,19 +36,26 @@ def _extract_epsg_from_geokeys(geokeys: tuple[int, ...] | list[int]) -> int | No
 
 
 def _load_geotiff_tags(path: Path) -> dict[str, float | str]:
-    img = Image.open(path)
-    tags = img.tag_v2
+    # Some reference maps are very large (e.g. 30000x30000). We only read tags,
+    # so temporarily disabling this safety limit is acceptable here.
+    old_max_pixels = Image.MAX_IMAGE_PIXELS
+    Image.MAX_IMAGE_PIXELS = None
+    try:
+        with Image.open(path) as img:
+            tags = img.tag_v2
+            if MODEL_PIXEL_SCALE_TAG not in tags:
+                raise ValueError(f"Missing TIFF tag {MODEL_PIXEL_SCALE_TAG} in {path}")
+            if MODEL_TIEPOINT_TAG not in tags:
+                raise ValueError(f"Missing TIFF tag {MODEL_TIEPOINT_TAG} in {path}")
+            if GEO_KEY_DIRECTORY_TAG not in tags:
+                raise ValueError(f"Missing TIFF tag {GEO_KEY_DIRECTORY_TAG} in {path}")
 
-    if MODEL_PIXEL_SCALE_TAG not in tags:
-        raise ValueError(f"Missing TIFF tag {MODEL_PIXEL_SCALE_TAG} in {path}")
-    if MODEL_TIEPOINT_TAG not in tags:
-        raise ValueError(f"Missing TIFF tag {MODEL_TIEPOINT_TAG} in {path}")
-    if GEO_KEY_DIRECTORY_TAG not in tags:
-        raise ValueError(f"Missing TIFF tag {GEO_KEY_DIRECTORY_TAG} in {path}")
+            scale = tags[MODEL_PIXEL_SCALE_TAG]
+            tiepoints = tags[MODEL_TIEPOINT_TAG]
+            geokeys = tags[GEO_KEY_DIRECTORY_TAG]
+    finally:
+        Image.MAX_IMAGE_PIXELS = old_max_pixels
 
-    scale = tags[MODEL_PIXEL_SCALE_TAG]
-    tiepoints = tags[MODEL_TIEPOINT_TAG]
-    geokeys = tags[GEO_KEY_DIRECTORY_TAG]
     if len(scale) < 2 or len(tiepoints) < 6:
         raise ValueError(f"Invalid GeoTIFF scale/tiepoint tags in {path}")
 
@@ -135,7 +142,7 @@ def _vips_to_numpy_hwc(image: Any) -> np.ndarray:
 def _resize_with_vips(
     image: Any,
     resize_hw: tuple[int, int] | None,
-    resize_mode: Literal["stretch", "letterbox"],
+    resize_mode: Literal["stretch", "letterbox", "center_crop"],
     pyvips: Any,
 ) -> tuple[Any, tuple[float, float], tuple[int, int, int, int]]:
     if resize_hw is None:
@@ -149,6 +156,16 @@ def _resize_with_vips(
         sy = target_h / float(src_h)
         resized = image.resize(sx, vscale=sy, kernel="lanczos3")
         return resized, (sx, sy), (0, 0, 0, 0)
+
+    if resize_mode == "center_crop":
+        scale = max(target_w / float(src_w), target_h / float(src_h))
+        new_w = max(1, int(round(src_w * scale)))
+        new_h = max(1, int(round(src_h * scale)))
+        resized = image.resize(new_w / float(src_w), vscale=new_h / float(src_h), kernel="lanczos3")
+        left = max(0, (new_w - target_w) // 2)
+        top = max(0, (new_h - target_h) // 2)
+        cropped = resized.crop(left, top, target_w, target_h)
+        return cropped, (scale, scale), (0, 0, 0, 0)
 
     scale = min(target_w / float(src_w), target_h / float(src_h))
     new_w = max(1, int(round(src_w * scale)))
@@ -217,6 +234,54 @@ def _resolve_scene_reference_path(scene: str, references_root: Path) -> Path:
     return uniq[0]
 
 
+def _extract_year_from_name(path: Path) -> int | None:
+    for token in path.stem.replace("-", "_").split("_"):
+        if token.isdigit() and len(token) == 4:
+            return int(token)
+    return None
+
+
+def _resolve_reference_path_flexible(scene: str, references_root: Path) -> Path:
+    """Resolve map TIFF for scene mode, with fallback for generic map folders.
+
+    Preferred:
+    1) Scene-prefixed files: <scene>_year_*_crop.tiff (legacy behavior)
+    2) map.tif[f]
+    3) year_*.tif[f] (latest year)
+    4) Any *.tif[f] (lexicographically last)
+    """
+    try:
+        return _resolve_scene_reference_path(scene=scene, references_root=references_root)
+    except FileNotFoundError:
+        pass
+
+    direct_map = [
+        references_root / "map.tiff",
+        references_root / "map.tif",
+    ]
+    for candidate in direct_map:
+        if candidate.exists():
+            return candidate
+
+    year_candidates = sorted(references_root.glob("year_*.tif*"))
+    if year_candidates:
+        year_with_key = []
+        for p in year_candidates:
+            y = _extract_year_from_name(p)
+            year_with_key.append((y if y is not None else -1, p))
+        year_with_key.sort(key=lambda t: (t[0], t[1].name))
+        return year_with_key[-1][1]
+
+    all_tiffs = sorted(p for p in references_root.iterdir() if p.is_file() and p.suffix.lower() in {".tif", ".tiff"})
+    if all_tiffs:
+        return all_tiffs[-1]
+
+    raise FileNotFoundError(
+        f"No reference TIFF found in {references_root}. "
+        "Expected either scene-prefixed TIFFs, map.tiff, year_*.tiff, or any .tif/.tiff file."
+    )
+
+
 @dataclass(frozen=True)
 class _SampleRef:
     sequence: str
@@ -251,9 +316,11 @@ class SyncedGpsImageDataset(Dataset[dict[str, Any]]):
         image_transform: Callable[[torch.Tensor], torch.Tensor] | None = None,
         gps_transform: Callable[[torch.Tensor], torch.Tensor] | None = None,
         resize_hw: tuple[int, int] | None = None,
-        resize_mode: Literal["stretch", "letterbox"] = "stretch",
+        resize_mode: Literal["stretch", "letterbox", "center_crop"] = "stretch",
         sat_compat: bool = False,
         roma_patch_size: int | None = None,
+        map_crop_meters: float | None = None,
+        map_output_hw: tuple[int, int] | None = None,
     ) -> None:
         scene_mode = scene is not None
         if map_scale < 1:
@@ -266,12 +333,18 @@ class SyncedGpsImageDataset(Dataset[dict[str, Any]]):
             raise ValueError("Use metadata_files or sequences_root, not both.")
         if resize_hw is not None and (resize_hw[0] <= 0 or resize_hw[1] <= 0):
             raise ValueError(f"resize_hw must be positive (H, W), got {resize_hw}")
-        if resize_mode not in {"stretch", "letterbox"}:
-            raise ValueError(f"resize_mode must be 'stretch' or 'letterbox', got {resize_mode}")
+        if resize_mode not in {"stretch", "letterbox", "center_crop"}:
+            raise ValueError(
+                f"resize_mode must be 'stretch', 'letterbox', or 'center_crop', got {resize_mode}"
+            )
         if scene_mode and resize_hw is None:
             raise ValueError("scene mode requires resize_hw so image/map shapes are deterministic.")
         if sat_compat and not scene_mode:
             raise ValueError("sat_compat requires scene mode because both image and map tensors are needed.")
+        if map_crop_meters is not None and map_crop_meters <= 0:
+            raise ValueError(f"map_crop_meters must be > 0, got {map_crop_meters}")
+        if map_output_hw is not None and (map_output_hw[0] <= 0 or map_output_hw[1] <= 0):
+            raise ValueError(f"map_output_hw must be positive (H, W), got {map_output_hw}")
         if roma_patch_size is not None:
             if roma_patch_size <= 0:
                 raise ValueError(f"roma_patch_size must be > 0, got {roma_patch_size}")
@@ -295,6 +368,8 @@ class SyncedGpsImageDataset(Dataset[dict[str, Any]]):
         self.sat_compat = bool(sat_compat)
         self.roma_patch_size = int(roma_patch_size) if roma_patch_size is not None else None
         self.map_scale = int(map_scale)
+        self.map_crop_meters = float(map_crop_meters) if map_crop_meters is not None else None
+        self.map_output_hw = tuple(map_output_hw) if map_output_hw is not None else None
         self._scene = scene
         self._map_georef: dict[str, float | str] | None = None
         self._map_vips: Any | None = None
@@ -331,7 +406,7 @@ class SyncedGpsImageDataset(Dataset[dict[str, Any]]):
         if not gps_path.exists():
             raise FileNotFoundError(f"GPS txt does not exist: {gps_path}")
 
-        map_path = _resolve_scene_reference_path(scene=scene, references_root=references_root)
+        map_path = _resolve_reference_path_flexible(scene=scene, references_root=references_root)
         map_georef = _load_geotiff_tags(map_path)
         self._map_georef = map_georef
         self._map_transformer = Transformer.from_crs(
@@ -454,6 +529,22 @@ class SyncedGpsImageDataset(Dataset[dict[str, Any]]):
         canvas.paste(resized, (left, top))
         return canvas, (float(scale), float(scale)), (left, top, right, bottom)
 
+    def _resize_center_crop(
+        self, image: Image.Image, target_hw: tuple[int, int]
+    ) -> tuple[Image.Image, tuple[float, float], tuple[int, int, int, int]]:
+        target_h, target_w = target_hw
+        src_w, src_h = image.size
+        scale = max(target_w / src_w, target_h / src_h)
+        new_w = max(1, int(round(src_w * scale)))
+        new_h = max(1, int(round(src_h * scale)))
+        resized = image.resize((new_w, new_h), Image.BILINEAR)
+        left = max(0, (new_w - target_w) // 2)
+        top = max(0, (new_h - target_h) // 2)
+        right = left + target_w
+        bottom = top + target_h
+        cropped = resized.crop((left, top, right, bottom))
+        return cropped, (float(scale), float(scale)), (0, 0, 0, 0)
+
     def __getitem__(self, idx: int) -> dict[str, Any]:
         row = self._samples[idx]
         if self._scene is None:
@@ -468,6 +559,8 @@ class SyncedGpsImageDataset(Dataset[dict[str, Any]]):
                         self.resize_hw[1] / float(orig_w),
                         self.resize_hw[0] / float(orig_h),
                     )
+                elif self.resize_mode == "center_crop":
+                    image, resize_scale_xy, pad_ltrb = self._resize_center_crop(image, self.resize_hw)
                 else:
                     image, resize_scale_xy, pad_ltrb = self._resize_letterbox(image, self.resize_hw)
 
@@ -529,8 +622,21 @@ class SyncedGpsImageDataset(Dataset[dict[str, Any]]):
         gps_time_tensor = torch.tensor(row.gps_time, dtype=torch.float32)
 
         out_h, out_w = image_arr.shape[0], image_arr.shape[1]
-        map_h = out_h * self.map_scale
-        map_w = out_w * self.map_scale
+        if self.map_crop_meters is not None:
+            scale_x = float(self._map_georef["scale_x"])
+            scale_y = float(self._map_georef["scale_y"])
+            crop_w_px = max(1, int(round(self.map_crop_meters / scale_x)))
+            crop_h_px = max(1, int(round(self.map_crop_meters / scale_y)))
+            if self.map_output_hw is not None:
+                map_h, map_w = self.map_output_hw
+            else:
+                map_h, map_w = crop_h_px, crop_w_px
+        else:
+            crop_h_px = out_h * self.map_scale
+            crop_w_px = out_w * self.map_scale
+            map_h = crop_h_px
+            map_w = crop_w_px
+
         px, py = _project_to_tiff_pixel(
             lon=row.longitude,
             lat=row.latitude,
@@ -546,10 +652,14 @@ class SyncedGpsImageDataset(Dataset[dict[str, Any]]):
             image=self._map_vips,
             center_x=px,
             center_y=py,
-            crop_w=map_w,
-            crop_h=map_h,
+            crop_w=crop_w_px,
+            crop_h=crop_h_px,
             pyvips=self._pyvips,
         )
+        if map_patch_vips.width != map_w or map_patch_vips.height != map_h:
+            sx = map_w / float(map_patch_vips.width)
+            sy = map_h / float(map_patch_vips.height)
+            map_patch_vips = map_patch_vips.resize(sx, vscale=sy, kernel="lanczos3")
         map_arr = _vips_to_numpy_hwc(map_patch_vips).astype(np.float32) / 255.0
         map_tensor = torch.from_numpy(map_arr).permute(2, 0, 1).contiguous()
 
@@ -563,8 +673,10 @@ class SyncedGpsImageDataset(Dataset[dict[str, Any]]):
         tie_y = float(self._map_georef["tie_y"])
         map_x0 = tie_x + (float(map_left_px) - tie_i) * scale_x
         map_y0 = tie_y - (float(map_top_px) - tie_j) * scale_y
-        map_axes_x = torch.tensor(map_x0 + np.arange(map_w, dtype=np.float32) * scale_x, dtype=torch.float32)
-        map_axes_y = torch.tensor(map_y0 - np.arange(map_h, dtype=np.float32) * scale_y, dtype=torch.float32)
+        map_x1 = map_x0 + (crop_w_px - 1) * scale_x
+        map_y1 = map_y0 - (crop_h_px - 1) * scale_y
+        map_axes_x = torch.tensor(np.linspace(map_x0, map_x1, map_w, dtype=np.float32), dtype=torch.float32)
+        map_axes_y = torch.tensor(np.linspace(map_y0, map_y1, map_h, dtype=np.float32), dtype=torch.float32)
 
         if self.image_transform is not None:
             image_tensor = self.image_transform(image_tensor)
@@ -680,9 +792,11 @@ def create_test_dataloader(
     image_transform: Callable[[torch.Tensor], torch.Tensor] | None = None,
     gps_transform: Callable[[torch.Tensor], torch.Tensor] | None = None,
     resize_hw: tuple[int, int] | None = None,
-    resize_mode: Literal["stretch", "letterbox"] = "stretch",
+    resize_mode: Literal["stretch", "letterbox", "center_crop"] = "stretch",
     sat_compat: bool = False,
     roma_patch_size: int | None = None,
+    map_crop_meters: float | None = None,
+    map_output_hw: tuple[int, int] | None = None,
 ) -> DataLoader[dict[str, Any]]:
     """Create a DataLoader suitable for inference/test mode (no shuffling)."""
     dataset = SyncedGpsImageDataset(
@@ -700,6 +814,8 @@ def create_test_dataloader(
         resize_mode=resize_mode,
         sat_compat=sat_compat,
         roma_patch_size=roma_patch_size,
+        map_crop_meters=map_crop_meters,
+        map_output_hw=map_output_hw,
     )
     return DataLoader(
         dataset,

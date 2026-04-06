@@ -40,15 +40,16 @@ def load_full_map_with_extent(map_path: str) -> tuple[np.ndarray, list[float]]:
 
 
 def main() -> None:
-    map_scale = 4
     loader = create_test_dataloader(
         scene="0007",
         images_root="test_images",
         gps_root="test_gps",
         references_root="test_references",
         resize_hw=(448, 448),  # defined image resolution
-        map_scale=map_scale,
         resize_mode="letterbox",
+        sat_compat=True,
+        map_crop_meters=26.0,
+        map_output_hw=(896, 896),
         batch_size=1,
     )
     loader_iter = iter(loader)

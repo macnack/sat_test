@@ -20,12 +20,36 @@ def main() -> None:
     parser = argparse.ArgumentParser(
         description="Visualize loader_low (224x224 letterbox, batch=1) and change frame every 0.1 second."
     )
-    parser.add_argument("--scene", default=None, help="Scene id, e.g. 0007 (uses test_images/test_gps/test_references).")
+    parser.add_argument(
+        "--scene",
+        default=None,
+        help="Scene id, e.g. 0007 (uses test_images/test_gps with georeferenced TIFF map folder).",
+    )
     parser.add_argument("--sequences-root", default="test_images", help="Root directory with sequence folders.")
     parser.add_argument("--gps-root", default="test_gps", help="Root directory with scene GPS txt files.")
-    parser.add_argument("--references-root", default="test_references", help="Root directory with reference tiffs.")
+    parser.add_argument(
+        "--references-root",
+        default="test_references",
+        help="Root directory with reference tiffs.",
+    )
     parser.add_argument("--interval-sec", type=float, default=0.1, help="Seconds between frame changes.")
+    parser.add_argument(
+        "--map-size-meters",
+        type=float,
+        default=26.0,
+        help="When scene mode is used, crop this map area size in meters around GPS center.",
+    )
+    parser.add_argument(
+        "--map-size-px",
+        type=int,
+        default=896,
+        help="When scene mode is used, resize map crop to this square pixel size.",
+    )
     args = parser.parse_args()
+    if args.map_size_meters <= 0:
+        raise ValueError(f"--map-size-meters must be positive, got {args.map_size_meters}")
+    if args.map_size_px <= 0:
+        raise ValueError(f"--map-size-px must be positive, got {args.map_size_px}")
 
     if args.scene:
         loader_low = create_test_dataloader(
@@ -33,11 +57,13 @@ def main() -> None:
             images_root=args.sequences_root,
             gps_root=args.gps_root,
             references_root=args.references_root,
-            map_scale=4,
             batch_size=1,
             num_workers=0,
             resize_hw=(224, 224),
             resize_mode="letterbox",
+            sat_compat=True,
+            map_crop_meters=args.map_size_meters,
+            map_output_hw=(args.map_size_px, args.map_size_px),
         )
     else:
         loader_low = create_test_dataloader(
