@@ -704,6 +704,8 @@ class SyncedGpsImageDataset(Dataset[dict[str, Any]]):
             "image_axes_y": image_axes_y,
             "map_axes_x": map_axes_x,
             "map_axes_y": map_axes_y,
+            "map_crop_origin_xy": (map_left_px, map_top_px),
+            "map_crop_size_wh": (crop_w_px, crop_h_px),
         }
         if self.sat_compat:
             out["im_A"] = image_tensor
@@ -747,6 +749,9 @@ def test_collate_fn(batch: list[dict[str, Any]]) -> dict[str, Any]:
         out["image_axes_y"] = torch.stack([b["image_axes_y"] for b in batch], dim=0)
         out["map_axes_x"] = torch.stack([b["map_axes_x"] for b in batch], dim=0)
         out["map_axes_y"] = torch.stack([b["map_axes_y"] for b in batch], dim=0)
+        if all("map_crop_origin_xy" in b for b in batch):
+            out["map_crop_origin_xy"] = [b["map_crop_origin_xy"] for b in batch]
+            out["map_crop_size_wh"] = [b["map_crop_size_wh"] for b in batch]
     if all("im_A" in b and "im_B" in b for b in batch):
         out["im_A"] = torch.stack([b["im_A"] for b in batch], dim=0)
         out["im_B"] = torch.stack([b["im_B"] for b in batch], dim=0)
