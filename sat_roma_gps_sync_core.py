@@ -152,7 +152,7 @@ def _n_localized(pred_world: np.ndarray) -> int:
     return int(np.isfinite(pred_world).all(axis=1).sum())
 
 
-def sweep_constant(pred_world, t, gps_world, world_to_px, crop_wh, offsets, min_valid_frac=0.5):
+def sweep_constant(pred_world, t, gps_world, world_to_px, crop_wh, offsets, min_valid_frac=0.8):
     """Median error vs constant offset. Returns (curve, best) where curve is a list of
     {dt, median, n_valid, n_oor}. `best` is the min-median entry among offsets that keep
     >= min_valid_frac of localized frames in-crop (so the offset can't 'win' by pushing
@@ -172,7 +172,7 @@ def sweep_constant(pred_world, t, gps_world, world_to_px, crop_wh, offsets, min_
     return curve, best
 
 
-def fit_drift(pred_world, t, gps_world, world_to_px, crop_wh, a_grid, b_grid, min_valid_frac=0.5):
+def fit_drift(pred_world, t, gps_world, world_to_px, crop_wh, a_grid, b_grid, min_valid_frac=0.8):
     """Grid-search offset(t)=a+b·t minimizing median error, subject to keeping
     >= min_valid_frac of localized frames in-crop. Returns (a, b, residual_errs, n_valid)."""
     t = np.asarray(t, dtype=np.float64)
