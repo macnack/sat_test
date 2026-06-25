@@ -6,3 +6,6 @@ __pycache__/
 # Local/generated data directories
 /test_*/
 /sync_test_images/
+
+# claude code local worktrees
+/.claude/worktrees/
