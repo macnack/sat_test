@@ -124,6 +124,14 @@ def main():
     ap.add_argument("--num-viz", type=int, default=6)
     ap.add_argument("--batch-size", type=int, default=8)
     ap.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    ap.add_argument("--resize-mode", default="safe_square",
+                    choices=["stretch", "letterbox", "center_crop", "safe_square"],
+                    help="im_A preprocessing; safe_square = samolot-style centered safe-square "
+                         "crop (r<=frac) then resize. DJI Mini 2 video is rectilinear (k~0).")
+    ap.add_argument("--safe-radius-frac", type=float, default=0.69,
+                    help="safe radius (fraction of half-diagonal) for --resize-mode safe_square; "
+                         "0.69 = square corners sit on the r=0.69 circle for a 16:9 frame "
+                         "(DJI Mini 2 is rectilinear, so this is framing, not distortion)")
     args = ap.parse_args()
 
     here = Path(__file__).resolve().parent
@@ -167,6 +175,7 @@ def main():
     ds = SyncedGpsImageDataset(
         scene=args.scene, images_root=str(images_root), gps_root=str(gps_root),
         references_root=str(references_root), resize_hw=(224, 224), map_scale=4,
+        resize_mode=args.resize_mode, safe_radius_frac=args.safe_radius_frac,
         sat_compat=True, map_crop_meters=args.crop_meters, map_output_hw=(896, 896))
     indices = _select_indices(len(ds), args.num_pairs)
     log.info("scene frames=%d -> %d pairs (crop %.0f m)", len(ds), len(indices), args.crop_meters)
