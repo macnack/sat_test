@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 from bisect import bisect_left
 from dataclasses import dataclass
 from pathlib import Path
@@ -140,11 +141,21 @@ def _vips_to_numpy_hwc(image: Any) -> np.ndarray:
     return arr.reshape(image.height, image.width, image.bands)
 
 
+def _safe_square_crop_box(w: int, h: int, frac: float = 0.85) -> tuple[int, int, int, int]:
+    """Largest centered square that is in-image AND inside the r<=frac distortion-safe
+    circle (r=1.0 = corner), side = min(W, H, frac*R*sqrt(2)).  Mirrors samolot's
+    safe-square crop.  Returns (x0, y0, side, side)."""
+    r_full = math.hypot(w / 2.0, h / 2.0)
+    s = int(round(min(float(w), float(h), frac * r_full * math.sqrt(2.0))))
+    return (w - s) // 2, (h - s) // 2, s, s
+
+
 def _resize_with_vips(
     image: Any,
     resize_hw: tuple[int, int] | None,
-    resize_mode: Literal["stretch", "letterbox", "center_crop"],
+    resize_mode: Literal["stretch", "letterbox", "center_crop", "safe_square"],
     pyvips: Any,
+    safe_radius_frac: float = 0.85,
 ) -> tuple[Any, tuple[float, float], tuple[int, int, int, int]]:
     if resize_hw is None:
         return image, (1.0, 1.0), (0, 0, 0, 0)
@@ -156,6 +167,15 @@ def _resize_with_vips(
         sx = target_w / float(src_w)
         sy = target_h / float(src_h)
         resized = image.resize(sx, vscale=sy, kernel="lanczos3")
+        return resized, (sx, sy), (0, 0, 0, 0)
+
+    if resize_mode == "safe_square":
+        # samolot-style: ONE centered crop to the safe square (drops distortion-prone
+        # wide edges + squares the frame), then resize to target.
+        x0, y0, side, _ = _safe_square_crop_box(src_w, src_h, safe_radius_frac)
+        cropped = image.crop(x0, y0, side, side)
+        sx, sy = target_w / float(side), target_h / float(side)
+        resized = cropped.resize(sx, vscale=sy, kernel="lanczos3")
         return resized, (sx, sy), (0, 0, 0, 0)
 
     if resize_mode == "center_crop":
@@ -317,7 +337,8 @@ class SyncedGpsImageDataset(Dataset[dict[str, Any]]):
         image_transform: Callable[[torch.Tensor], torch.Tensor] | None = None,
         gps_transform: Callable[[torch.Tensor], torch.Tensor] | None = None,
         resize_hw: tuple[int, int] | None = None,
-        resize_mode: Literal["stretch", "letterbox", "center_crop"] = "stretch",
+        resize_mode: Literal["stretch", "letterbox", "center_crop", "safe_square"] = "safe_square",
+        safe_radius_frac: float = 0.85,
         sat_compat: bool = False,
         roma_patch_size: int | None = None,
         map_crop_meters: float | None = None,
@@ -335,9 +356,10 @@ class SyncedGpsImageDataset(Dataset[dict[str, Any]]):
             raise ValueError("Use metadata_files or sequences_root, not both.")
         if resize_hw is not None and (resize_hw[0] <= 0 or resize_hw[1] <= 0):
             raise ValueError(f"resize_hw must be positive (H, W), got {resize_hw}")
-        if resize_mode not in {"stretch", "letterbox", "center_crop"}:
+        if resize_mode not in {"stretch", "letterbox", "center_crop", "safe_square"}:
             raise ValueError(
-                f"resize_mode must be 'stretch', 'letterbox', or 'center_crop', got {resize_mode}"
+                "resize_mode must be 'stretch', 'letterbox', 'center_crop', or "
+                f"'safe_square', got {resize_mode}"
             )
         if scene_mode and resize_hw is None:
             raise ValueError("scene mode requires resize_hw so image/map shapes are deterministic.")
@@ -369,6 +391,7 @@ class SyncedGpsImageDataset(Dataset[dict[str, Any]]):
         self.gps_transform = gps_transform
         self.resize_hw = resize_hw
         self.resize_mode = resize_mode
+        self.safe_radius_frac = safe_radius_frac
         self.sat_compat = bool(sat_compat)
         self.roma_patch_size = int(roma_patch_size) if roma_patch_size is not None else None
         self.map_scale = int(map_scale)
@@ -575,6 +598,17 @@ class SyncedGpsImageDataset(Dataset[dict[str, Any]]):
         canvas.paste(resized, (left, top))
         return canvas, (float(scale), float(scale)), (left, top, right, bottom)
 
+    def _resize_safe_square(
+        self, image: Image.Image, target_hw: tuple[int, int]
+    ) -> tuple[Image.Image, tuple[float, float], tuple[int, int, int, int]]:
+        # samolot-style: ONE centered crop to the safe square, then resize.
+        target_h, target_w = target_hw
+        src_w, src_h = image.size
+        x0, y0, side, _ = _safe_square_crop_box(src_w, src_h, self.safe_radius_frac)
+        cropped = image.crop((x0, y0, x0 + side, y0 + side))
+        resized = cropped.resize((target_w, target_h), Image.BILINEAR)
+        return resized, (target_w / float(side), target_h / float(side)), (0, 0, 0, 0)
+
     def _resize_center_crop(
         self, image: Image.Image, target_hw: tuple[int, int]
     ) -> tuple[Image.Image, tuple[float, float], tuple[int, int, int, int]]:
@@ -607,6 +641,8 @@ class SyncedGpsImageDataset(Dataset[dict[str, Any]]):
                     )
                 elif self.resize_mode == "center_crop":
                     image, resize_scale_xy, pad_ltrb = self._resize_center_crop(image, self.resize_hw)
+                elif self.resize_mode == "safe_square":
+                    image, resize_scale_xy, pad_ltrb = self._resize_safe_square(image, self.resize_hw)
                 else:
                     image, resize_scale_xy, pad_ltrb = self._resize_letterbox(image, self.resize_hw)
 
@@ -657,6 +693,7 @@ class SyncedGpsImageDataset(Dataset[dict[str, Any]]):
             resize_hw=self.resize_hw,
             resize_mode=self.resize_mode,
             pyvips=self._pyvips,
+            safe_radius_frac=self.safe_radius_frac,
         )
         image_arr = _vips_to_numpy_hwc(image_vips).astype(np.float32) / 255.0
         image_tensor = torch.from_numpy(image_arr).permute(2, 0, 1).contiguous()
@@ -843,7 +880,8 @@ def create_test_dataloader(
     image_transform: Callable[[torch.Tensor], torch.Tensor] | None = None,
     gps_transform: Callable[[torch.Tensor], torch.Tensor] | None = None,
     resize_hw: tuple[int, int] | None = None,
-    resize_mode: Literal["stretch", "letterbox", "center_crop"] = "stretch",
+    resize_mode: Literal["stretch", "letterbox", "center_crop", "safe_square"] = "safe_square",
+    safe_radius_frac: float = 0.85,
     sat_compat: bool = False,
     roma_patch_size: int | None = None,
     map_crop_meters: float | None = None,
@@ -870,6 +908,7 @@ def create_test_dataloader(
         gps_transform=gps_transform,
         resize_hw=resize_hw,
         resize_mode=resize_mode,
+        safe_radius_frac=safe_radius_frac,
         sat_compat=sat_compat,
         roma_patch_size=roma_patch_size,
         map_crop_meters=map_crop_meters,
